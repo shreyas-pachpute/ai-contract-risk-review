@@ -1,5 +1,43 @@
 # AI Contract & Commercial Risk Review System
 
+## Implementation Status (MVP)
+
+The design below is implemented under `src/contractreview/`, matching PROJECT.md Section 21's MVP scope: one contract type (mutual vendor NDA) with a well-defined playbook, structured clause extraction, deterministic policy comparison, and a reviewer-facing flagged-item list with cited explanations — no other contract types, no historical-precedent comparison yet.
+
+What exists:
+
+- A labeled set of 5 synthetic mutual NDAs (`data/contracts.py`): one fully compliant, one with a genuine deviation on every one of the six checked clauses, two borderline contracts with 1-2 real deviations each, and one compliant-but-verbosely-drafted contract (a false-positive-avoidance check). Each has a hand-labeled ground-truth extraction for accuracy scoring (Section 14).
+- An LLM-based clause-extraction stage (`extraction/extract.py`) — the one place document variety genuinely needs model reasoning (Section 8) — producing a typed `ExtractedContract` where every field carries the verbatim excerpt it was read from.
+- **100% deterministic policy comparison** (`playbook/rules.py`, zero LLM cost): a configuration-driven `Playbook` (Section 19: "legal ops maintained, not engineer-hard-coded") checked against six clause types (confidentiality term, governing law, auto-renewal notice, liability cap, indemnification scope, assignment consent). Never the model's judgment.
+- A single-call Risk Review Agent (`agent/review.py`) that explains only the clauses the rules engine already flagged — it cannot invent a new flag, and is skipped entirely (zero LLM calls) when a contract has none.
+- A grounding validator (`agent/grounding.py`) requiring every explanation's `clause_type` to match a real flag and every cited excerpt to be a verbatim substring of that flag's source text.
+- No counterparty-facing capability anywhere in this codebase — no drafting, sending, or negotiating tool exists in the agent's action space (Section 15).
+
+### Setup
+
+```bash
+python -m venv .venv
+./.venv/Scripts/activate         # or source .venv/bin/activate on macOS/Linux
+pip install -e .
+# add GEMINI_API_KEY=... to a local .env (gitignored), or set LLM_PROVIDER=ollama
+```
+
+### Usage
+
+```bash
+python -m contractreview.cli flags                        # deterministic policy comparison, zero LLM cost
+python -m contractreview.cli review --contract globex_risky  # full pipeline: extract, compare, explain
+python -m contractreview.cli eval                          # all 5 contracts: flag recall, extraction accuracy, grounding
+pytest tests/                                               # zero API cost
+```
+
+### Verified so far
+
+- All 21 deterministic tests pass, after catching and fixing real bugs pre-emptively via the tests themselves: (1) four hand-labeled fixture excerpts didn't actually appear verbatim in their contract text (an ellipsis used as shorthand, and a "shall not exceed" vs. actual "shall exceed" wording slip in two liability clauses) — caught by `test_every_labeled_raw_text_excerpt_is_grounded_in_its_contract_text`, which exists specifically because a wrong "ground truth" fixture would silently corrupt every accuracy metric built on it.
+- **Live-verified** against Ollama (`llama3.2:1b`) across three contracts spanning the compliance spectrum (fully compliant, borderline, worst-case). This surfaced one real code bug and one honest model-capability finding:
+  - **Bug (fixed):** the first live run on the fully-compliant contract extracted the governing-law jurisdiction as "State of Delaware" rather than "Delaware" — an exact-string membership check against the approved-jurisdictions set then wrongly flagged a compliant contract. Fixed with `_normalize_jurisdiction()` (strips the "State of"/"Commonwealth of" prefix before comparison), with a regression test locking in the fix. The same class of bug as project 03's payer-name normalization.
+  - **Capability ceiling (documented, not fixed):** across the three live runs, extraction was 100% correct on five of the six clause types every time (confidentiality term, governing law, auto-renewal, liability cap, assignment) — but the indemnification-scope field was unreliable in *both directions*: `llama3.2:1b` twice classified genuinely standard (direct-damages-only) indemnification clauses as "broad," and once classified a genuinely broad clause (explicitly covering indirect/consequential/punitive damages and third-party claims) as "standard," missing it entirely. In every case the extracted `raw_text` excerpt was itself accurate and grounding passed 100% — the failure is specifically in the semantic scope classification, not retrieval. This is the same category of finding as project 07's narrative-quality gap: the deterministic architecture and citation grounding held completely; a 1B-parameter model's judgment on this one semantically nuanced field did not, and is expected to improve materially on the intended production model (Gemini).
+
 ## 1. One-Sentence Explanation
 
 This is an AI system that gives a company's legal and commercial teams a fast first-pass review of a contract — what's unusual, what's risky, and what to check — before a qualified human makes any actual legal judgment.
